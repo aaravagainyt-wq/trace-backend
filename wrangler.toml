@@ -1,0 +1,11 @@
+name = "trace-backend"
+main = "worker.js"
+compatibility_date = "2026-08-26"
+
+[vars]
+# Replace this with your actual InfinityFree URL
+ALLOWED_ORIGIN = "https://YOUR-SITE.infinityfreeapp.com"
+
+[[kv_namespaces]]
+binding = "RATE_LIMIT"
+id = "YOUR_KV_NAMESPACE_ID"
