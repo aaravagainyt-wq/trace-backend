@@ -8,4 +8,4 @@ ALLOWED_ORIGIN = "https://YOUR-SITE.infinityfreeapp.com"
 
 [[kv_namespaces]]
 binding = "RATE_LIMIT"
-id = "YOUR_KV_NAMESPACE_ID"
+id = "98a5287971e74af499884d52c77e02d8"
