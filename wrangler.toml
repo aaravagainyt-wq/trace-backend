@@ -4,7 +4,7 @@ compatibility_date = "2026-08-26"
 
 [vars]
 # Replace this with your actual InfinityFree URL
-ALLOWED_ORIGIN = "https://trace.kesug.com/?i=1"
+ALLOWED_ORIGIN = "https://trace.kesug.com"
 
 [[kv_namespaces]]
 binding = "RATE_LIMIT"
