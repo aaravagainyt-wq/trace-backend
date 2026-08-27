@@ -1,264 +1,441 @@
-// ============================================================
-// trace. — AI Nutrition Scanner Backend
-// Cloudflare Worker
-// ============================================================
-//
-// Routes:
-//
-// POST /analyze
-//     Upload image as multipart/form-data
-//     Field name: "image"
-//
-// POST /unlock
-//     JSON: { "code": "YOUR_OWNER_CODE" }
-//
-// GET /
-//     Health check
-//
-// Cloudflare secrets required:
-//
-// GROQ_API_KEY
-// OWNER_CODE
-//
-// ============================================================
-
 const MODEL = "qwen/qwen3.6-27b";
 
 const FREE_SCAN_LIMIT = 3;
 
-// 24 hours
-const RATE_LIMIT_WINDOW = 24 * 60 * 60 * 1000;
+const RATE_LIMIT_WINDOW =
+    24 * 60 * 60 * 1000;
 
-// Change this to your actual InfinityFree domain.
-const ALLOWED_ORIGIN = "https://YOUR-SITE.infinityfreeapp.com";
+const DEFAULT_ORIGIN =
+    "https://trace.kesug.com";
 
-
-// ============================================================
-// MAIN
-// ============================================================
 
 export default {
+
     async fetch(request, env) {
 
-        const url = new URL(request.url);
+        const url =
+            new URL(request.url);
 
-        // ----------------------------------------------------
+
         // CORS
-        // ----------------------------------------------------
 
         if (request.method === "OPTIONS") {
+
             return new Response(null, {
                 status: 204,
-                headers: corsHeaders()
+                headers: corsHeaders(env)
             });
+
         }
 
-        // ----------------------------------------------------
-        // Health check
-        // ----------------------------------------------------
 
-        if (url.pathname === "/" && request.method === "GET") {
+        // Health check
+
+        if (
+            url.pathname === "/" &&
+            request.method === "GET"
+        ) {
 
             return json({
+
                 success: true,
+
                 service: "trace.",
+
                 status: "online"
-            });
+
+            }, 200, env);
+
         }
 
-        // ----------------------------------------------------
+
         // Owner unlock
-        // ----------------------------------------------------
 
         if (
             url.pathname === "/unlock" &&
             request.method === "POST"
         ) {
-            return unlock(request, env);
+
+            return unlock(
+                request,
+                env
+            );
+
         }
 
-        // ----------------------------------------------------
+
         // Nutrition analysis
-        // ----------------------------------------------------
 
         if (
             url.pathname === "/analyze" &&
             request.method === "POST"
         ) {
-            return analyze(request, env);
+
+            return analyze(
+                request,
+                env
+            );
+
         }
 
-        return json(
-            {
-                success: false,
-                error: "Endpoint not found."
-            },
-            404
-        );
+
+        return json({
+
+            success: false,
+
+            error:
+                "Endpoint not found."
+
+        }, 404, env);
+
     }
+
 };
 
 
-// ============================================================
-// ANALYZE
-// ============================================================
+/* =========================================================
+   CORS
+========================================================= */
 
-async function analyze(request, env) {
+function corsHeaders(env) {
 
-    // --------------------------------------------------------
-    // Basic content check
-    // --------------------------------------------------------
+    return {
+
+        "Access-Control-Allow-Origin":
+            env.ALLOWED_ORIGIN ||
+            DEFAULT_ORIGIN,
+
+        "Access-Control-Allow-Methods":
+            "GET, POST, OPTIONS",
+
+        "Access-Control-Allow-Headers":
+            "Content-Type, X-Trace-Owner-Token",
+
+        "Access-Control-Max-Age":
+            "86400"
+
+    };
+
+}
+
+
+/* =========================================================
+   JSON RESPONSE
+========================================================= */
+
+function json(
+    data,
+    status = 200,
+    env
+) {
+
+    return new Response(
+
+        JSON.stringify(data),
+
+        {
+
+            status: status,
+
+            headers: {
+
+                "Content-Type":
+                    "application/json; charset=utf-8",
+
+                ...corsHeaders(env)
+
+            }
+
+        }
+
+    );
+
+}
+
+
+/* =========================================================
+   ANALYZE
+========================================================= */
+
+async function analyze(
+    request,
+    env
+) {
 
     const contentType =
-        request.headers.get("content-type") || "";
+        request.headers.get(
+            "content-type"
+        ) || "";
 
-    if (!contentType.includes("multipart/form-data")) {
-        return json(
-            {
-                success: false,
-                error: "Request must use multipart/form-data."
-            },
-            400
-        );
+
+    if (
+        !contentType
+            .toLowerCase()
+            .includes(
+                "multipart/form-data"
+            )
+    ) {
+
+        return json({
+
+            success: false,
+
+            error:
+                "Request must use multipart/form-data."
+
+        }, 400, env);
+
     }
 
-    // --------------------------------------------------------
-    // Check owner token
-    // --------------------------------------------------------
+
+    // -----------------------------------------------------
+    // Owner token
+    // -----------------------------------------------------
 
     const ownerToken =
-        request.headers.get("X-Trace-Owner-Token");
+        request.headers.get(
+            "X-Trace-Owner-Token"
+        );
+
 
     const ownerMode =
-        await verifyOwnerToken(ownerToken, env);
+        await verifyOwnerToken(
+            ownerToken,
+            env
+        );
 
-    // --------------------------------------------------------
-    // Rate limit normal users
-    // --------------------------------------------------------
+
+    // -----------------------------------------------------
+    // User IP
+    // -----------------------------------------------------
 
     const ip =
-        request.headers.get("CF-Connecting-IP") ||
-        request.headers.get("X-Forwarded-For") ||
+        request.headers.get(
+            "CF-Connecting-IP"
+        ) ||
+
+        request.headers.get(
+            "X-Forwarded-For"
+        ) ||
+
         "unknown";
+
+
+    // -----------------------------------------------------
+    // 3 scan limit
+    // -----------------------------------------------------
 
     if (!ownerMode) {
 
+        if (!env.RATE_LIMIT) {
+
+            console.error(
+                "RATE_LIMIT KV binding missing."
+            );
+
+            return json({
+
+                success: false,
+
+                error:
+                    "Rate-limit storage is not configured."
+
+            }, 500, env);
+
+        }
+
+
         const rateResult =
-            await checkRateLimit(ip, env);
+            await checkRateLimit(
+                ip,
+                env
+            );
+
 
         if (!rateResult.allowed) {
 
-            return json(
-                {
-                    success: false,
-                    error:
-                        "You have used all 3 free scans for today.",
-                    remaining_scans: 0
-                },
-                429
-            );
+            return json({
+
+                success: false,
+
+                error:
+                    "You have used all 3 free scans for today.",
+
+                remaining_scans: 0
+
+            }, 429, env);
+
         }
+
     }
 
-    // --------------------------------------------------------
-    // Get uploaded image
-    // --------------------------------------------------------
+
+    // -----------------------------------------------------
+    // Read image
+    // -----------------------------------------------------
 
     let formData;
 
-    try {
-        formData = await request.formData();
-    } catch {
 
-        return json(
-            {
-                success: false,
-                error: "Could not read uploaded data."
-            },
-            400
+    try {
+
+        formData =
+            await request.formData();
+
+    } catch (error) {
+
+        console.error(
+            "FormData error:",
+            error
         );
+
+        return json({
+
+            success: false,
+
+            error:
+                "Could not read uploaded data."
+
+        }, 400, env);
+
     }
+
 
     const image =
         formData.get("image");
 
+
     if (!(image instanceof File)) {
 
-        return json(
-            {
-                success: false,
-                error: "No image was uploaded."
-            },
-            400
-        );
+        return json({
+
+            success: false,
+
+            error:
+                "No image was uploaded."
+
+        }, 400, env);
+
     }
 
-    // --------------------------------------------------------
-    // File size
-    // --------------------------------------------------------
 
-    const MAX_SIZE = 8 * 1024 * 1024;
+    // -----------------------------------------------------
+    // Image size
+    // -----------------------------------------------------
+
+    const MAX_SIZE =
+        8 * 1024 * 1024;
+
 
     if (image.size > MAX_SIZE) {
 
-        return json(
-            {
-                success: false,
-                error:
-                    "Image is too large. Maximum size is 8 MB."
-            },
-            400
-        );
+        return json({
+
+            success: false,
+
+            error:
+                "Image is too large. Maximum size is 8 MB."
+
+        }, 400, env);
+
     }
 
-    // --------------------------------------------------------
-    // MIME validation
-    // --------------------------------------------------------
+
+    // -----------------------------------------------------
+    // Image type
+    // -----------------------------------------------------
 
     const allowedTypes = [
+
         "image/jpeg",
+
         "image/png",
+
         "image/webp"
+
     ];
 
-    if (!allowedTypes.includes(image.type)) {
 
-        return json(
-            {
-                success: false,
-                error:
-                    "Only JPG, PNG and WebP images are supported."
-            },
-            400
-        );
+    if (
+        !allowedTypes.includes(
+            image.type
+        )
+    ) {
+
+        return json({
+
+            success: false,
+
+            error:
+                "Only JPG, PNG and WebP images are supported."
+
+        }, 400, env);
+
     }
 
-    // --------------------------------------------------------
+
+    // -----------------------------------------------------
+    // Groq key check
+    // -----------------------------------------------------
+
+    if (!env.GROQ_API_KEY) {
+
+        console.error(
+            "GROQ_API_KEY secret is missing."
+        );
+
+        return json({
+
+            success: false,
+
+            error:
+                "AI service is not configured."
+
+        }, 500, env);
+
+    }
+
+
+    // -----------------------------------------------------
     // Convert image to base64
-    // --------------------------------------------------------
+    // -----------------------------------------------------
 
     const imageBuffer =
         await image.arrayBuffer();
 
+
     const base64 =
-        arrayBufferToBase64(imageBuffer);
+        arrayBufferToBase64(
+            imageBuffer
+        );
+
 
     const imageDataUrl =
         `data:${image.type};base64,${base64}`;
 
-    // --------------------------------------------------------
-    // Prompt
-    // --------------------------------------------------------
+
+    // -----------------------------------------------------
+    // Language
+    // -----------------------------------------------------
+
+    const language =
+        formData.get("language") === "hi"
+            ? "hi"
+            : "en";
+
+
+    // -----------------------------------------------------
+    // AI prompt
+    // -----------------------------------------------------
 
     const prompt = `
-You are the nutrition-label extraction engine for trace.
 
-Analyze ONLY information that is actually visible in the
-uploaded food packaging image.
+You are the nutrition-label analysis engine for trace.
 
-Your job is to extract nutrition facts and ingredients.
+Analyze ONLY information actually visible in the uploaded
+food packaging image.
 
-NEVER invent missing values.
+Never invent missing nutrition values.
 
 Return ONLY valid JSON.
 
@@ -281,6 +458,12 @@ Use this exact structure:
   "ingredients": [],
   "notable_ingredients": [],
   "allergens": [],
+  "good": [],
+  "watch": [],
+  "ayurveda": {
+    "elements": [],
+    "perspective": ""
+  },
   "confidence": "high"
 }
 
@@ -289,202 +472,324 @@ Rules:
 1. Only use information visible in the image.
 2. Missing values MUST be null.
 3. Never guess nutrition values.
-4. Preserve the label's units where possible.
+4. Preserve label units where possible.
 5. Do not make medical diagnoses.
 6. Do not automatically call unfamiliar ingredients harmful.
 7. Report serving size accurately.
 8. Report servings per package when visible.
-9. ingredients should contain the visible ingredient list.
-10. notable_ingredients should contain relevant visible ingredients.
+9. ingredients must contain the visible ingredient list.
+10. notable_ingredients should contain useful visible ingredients.
 11. allergens should contain only clearly identifiable allergens.
-12. confidence must be high, medium, or low.
+12. good should contain short factual positive observations.
+13. watch should contain short factual things worth noticing.
+14. Do not call food universally healthy or unhealthy.
+15. Ayurveda must be a general traditional perspective only.
+16. Do not diagnose doshas or claim treatment.
+17. confidence must be high, medium, or low.
+18. Use ${
+    language === "hi"
+        ? "Hindi"
+        : "English"
+} for good, watch and Ayurveda text.
+19. Keep explanations concise.
 
 Do not return markdown.
 Do not return explanations outside the JSON.
+
 `;
 
-    // --------------------------------------------------------
+
+    // -----------------------------------------------------
     // Groq request
-    // --------------------------------------------------------
+    // -----------------------------------------------------
 
-    const groqResponse =
-        await fetch(
-            "https://api.groq.com/openai/v1/chat/completions",
-            {
-                method: "POST",
+    let groqResponse;
 
-                headers: {
-                    "Authorization":
-                        `Bearer ${env.GROQ_API_KEY}`,
 
-                    "Content-Type":
-                        "application/json"
-                },
+    try {
 
-                body: JSON.stringify({
+        groqResponse =
+            await fetch(
 
-                    model: MODEL,
+                "https://api.groq.com/openai/v1/chat/completions",
 
-                    temperature: 0,
+                {
 
-                    max_completion_tokens: 1500,
+                    method: "POST",
 
-                    response_format: {
-                        type: "json_object"
+                    headers: {
+
+                        "Authorization":
+                            `Bearer ${env.GROQ_API_KEY}`,
+
+                        "Content-Type":
+                            "application/json"
+
                     },
 
-                    messages: [
+                    body: JSON.stringify({
 
-                        {
-                            role: "system",
+                        model: MODEL,
 
-                            content:
-                                "Extract nutrition labels accurately. " +
-                                "Never invent missing values."
+                        temperature: 0,
+
+                        max_completion_tokens:
+                            1800,
+
+                        response_format: {
+
+                            type:
+                                "json_object"
+
                         },
 
-                        {
-                            role: "user",
+                        messages: [
 
-                            content: [
+                            {
 
-                                {
-                                    type: "text",
-                                    text: prompt
-                                },
+                                role:
+                                    "system",
 
-                                {
-                                    type: "image_url",
+                                content:
+                                    "Extract nutrition labels accurately. Never invent missing values."
 
-                                    image_url: {
-                                        url: imageDataUrl
+                            },
+
+                            {
+
+                                role:
+                                    "user",
+
+                                content: [
+
+                                    {
+
+                                        type:
+                                            "text",
+
+                                        text:
+                                            prompt
+
+                                    },
+
+                                    {
+
+                                        type:
+                                            "image_url",
+
+                                        image_url: {
+
+                                            url:
+                                                imageDataUrl
+
+                                        }
+
                                     }
-                                }
 
-                            ]
-                        }
+                                ]
 
-                    ]
-                })
-            }
+                            }
+
+                        ]
+
+                    })
+
+                }
+
+            );
+
+    } catch (error) {
+
+        console.error(
+            "Groq network error:",
+            error
         );
 
-    // --------------------------------------------------------
+        return json({
+
+            success: false,
+
+            error:
+                "Could not connect to the AI service."
+
+        }, 502, env);
+
+    }
+
+
+    // -----------------------------------------------------
     // Groq error
-    // --------------------------------------------------------
+    // -----------------------------------------------------
 
     if (!groqResponse.ok) {
 
+        const errorText =
+            await groqResponse.text();
+
+
         console.error(
-            "Groq error:",
-            await groqResponse.text()
+
+            "Groq API error:",
+
+            groqResponse.status,
+
+            errorText
+
         );
 
-        return json(
-            {
-                success: false,
-                error:
-                    "The AI service could not process the image."
-            },
-            502
-        );
+
+        return json({
+
+            success: false,
+
+            error:
+                "The AI service could not process the image."
+
+        }, 502, env);
+
     }
 
-    // --------------------------------------------------------
-    // Read Groq response
-    // --------------------------------------------------------
 
-    const groqData =
-        await groqResponse.json();
+    // -----------------------------------------------------
+    // Read Groq response
+    // -----------------------------------------------------
+
+    let groqData;
+
+
+    try {
+
+        groqData =
+            await groqResponse.json();
+
+    } catch (error) {
+
+        console.error(
+            "Groq JSON error:",
+            error
+        );
+
+        return json({
+
+            success: false,
+
+            error:
+                "The AI returned an unreadable response."
+
+        }, 502, env);
+
+    }
+
 
     const content =
-        groqData?.choices?.[0]?.message?.content;
+        groqData
+            ?.choices?.[0]
+            ?.message?.content;
+
 
     if (!content) {
 
-        return json(
-            {
-                success: false,
-                error:
-                    "The AI returned no usable result."
-            },
-            502
-        );
+        return json({
+
+            success: false,
+
+            error:
+                "The AI returned no usable result."
+
+        }, 502, env);
+
     }
 
-    // --------------------------------------------------------
-    // Parse AI JSON
-    // --------------------------------------------------------
 
     let nutrition;
+
 
     try {
 
         nutrition =
             typeof content === "string"
+
                 ? JSON.parse(content)
+
                 : content;
 
-    } catch {
+    } catch (error) {
 
-        return json(
-            {
-                success: false,
-                error:
-                    "The AI returned invalid nutrition data."
-            },
-            502
+        console.error(
+            "AI parse error:",
+            content
         );
+
+        return json({
+
+            success: false,
+
+            error:
+                "The AI returned invalid nutrition data."
+
+        }, 502, env);
+
     }
 
-    // --------------------------------------------------------
-    // Calculate score ourselves
-    // --------------------------------------------------------
 
-    const score =
-        calculateScore(nutrition);
+    // -----------------------------------------------------
+    // Score
+    // -----------------------------------------------------
 
-    nutrition.score = score;
+    nutrition.score =
+        calculateScore(
+            nutrition
+        );
 
-    // --------------------------------------------------------
-    // Consume scan AFTER successful AI processing
-    // --------------------------------------------------------
+
+    // -----------------------------------------------------
+    // Consume scan only after success
+    // -----------------------------------------------------
 
     let remainingScans = null;
+
 
     if (!ownerMode) {
 
         remainingScans =
-            await consumeScan(ip, env);
+            await consumeScan(
+                ip,
+                env
+            );
+
     }
 
-    // --------------------------------------------------------
+
+    // -----------------------------------------------------
     // Final response
-    // --------------------------------------------------------
+    // -----------------------------------------------------
 
     return json({
 
         success: true,
 
-        owner_mode: ownerMode,
+        owner_mode:
+            ownerMode,
 
         remaining_scans:
             remainingScans,
 
-        data: nutrition,
+        data:
+            nutrition,
 
         warning:
-            "This analysis is based on the information visible " +
-            "on the product label and is intended for informational " +
-            "purposes only. Always check the actual packaging for " +
-            "the most accurate information."
-    });
-}
+            language === "hi"
 
+                ? "यह विश्लेषण प्रोडक्ट लेबल पर दिखाई देने वाली जानकारी पर आधारित है और केवल जानकारी के लिए है। सबसे सही जानकारी के लिए असली पैकेजिंग देखें।"
 
-// ============================================================
-// NUTRITION SCORE
-// ============================================================
+                : "This analysis is based on information visible on the product label and is intended for informational purposes only. Always check the actual packaging for the most accurate information."
+
+    }, 200, env);
+
+        }
+/* =========================================================
+   NUTRITION SCORE
+========================================================= */
 
 function calculateScore(data) {
 
@@ -505,6 +810,7 @@ function calculateScore(data) {
     const sodium =
         number(data.sodium);
 
+
     // Protein
 
     if (protein !== null) {
@@ -516,7 +822,9 @@ function calculateScore(data) {
         else if (protein >= 5) {
             score += 0.5;
         }
+
     }
+
 
     // Fiber
 
@@ -529,7 +837,9 @@ function calculateScore(data) {
         else if (fiber >= 3) {
             score += 0.5;
         }
+
     }
+
 
     // Added sugar
 
@@ -542,16 +852,21 @@ function calculateScore(data) {
         else if (addedSugar > 8) {
             score -= 0.75;
         }
+
     }
+
 
     // Saturated fat
 
-    if (saturatedFat !== null) {
+    if (
+        saturatedFat !== null &&
+        saturatedFat > 5
+    ) {
 
-        if (saturatedFat > 5) {
-            score -= 1;
-        }
+        score -= 1;
+
     }
+
 
     // Sodium
 
@@ -564,7 +879,9 @@ function calculateScore(data) {
         else if (sodium > 300) {
             score -= 0.5;
         }
+
     }
+
 
     return Math.max(
         0,
@@ -573,43 +890,68 @@ function calculateScore(data) {
             Math.round(score * 10) / 10
         )
     );
+
 }
 
 
-// ============================================================
-// RATE LIMIT
-// ============================================================
-//
-// Uses Cloudflare KV.
-//
-// Create a KV namespace called:
-//
-// TRACE_LIMITS
-//
-// Then bind it to the Worker as:
-//
-// RATE_LIMIT
-//
-// ============================================================
+/* =========================================================
+   RATE LIMIT
+========================================================= */
 
-async function checkRateLimit(ip, env) {
+async function checkRateLimit(
+    ip,
+    env
+) {
 
     const key =
         `scan:${ip}`;
 
+
     const existing =
-        await env.RATE_LIMIT.get(key);
+        await env.RATE_LIMIT.get(
+            key
+        );
+
 
     if (!existing) {
 
         return {
+
             allowed: true,
+
             scans: 0
+
         };
+
     }
 
-    const data =
-        JSON.parse(existing);
+
+    let data;
+
+
+    try {
+
+        data =
+            JSON.parse(existing);
+
+    }
+
+    catch {
+
+        await env.RATE_LIMIT.delete(
+            key
+        );
+
+        return {
+
+            allowed: true,
+
+            scans: 0
+
+        };
+
+    }
+
 
     if (
         Date.now() -
@@ -617,111 +959,209 @@ async function checkRateLimit(ip, env) {
         RATE_LIMIT_WINDOW
     ) {
 
-        await env.RATE_LIMIT.delete(key);
+        await env.RATE_LIMIT.delete(
+            key
+        );
 
         return {
+
             allowed: true,
+
             scans: 0
+
         };
+
     }
 
+
     return {
+
         allowed:
-            data.scans < FREE_SCAN_LIMIT,
+            data.scans <
+            FREE_SCAN_LIMIT,
 
         scans:
             data.scans
+
     };
+
 }
 
 
-async function consumeScan(ip, env) {
+/* =========================================================
+   CONSUME SCAN
+========================================================= */
+
+async function consumeScan(
+    ip,
+    env
+) {
 
     const key =
         `scan:${ip}`;
 
+
     const existing =
-        await env.RATE_LIMIT.get(key);
+        await env.RATE_LIMIT.get(
+            key
+        );
+
 
     let data;
+
 
     if (!existing) {
 
         data = {
-            created: Date.now(),
-            scans: 1
+
+            created:
+                Date.now(),
+
+            scans:
+                1
+
         };
 
-    } else {
-
-        data =
-            JSON.parse(existing);
-
-        data.scans++;
     }
 
+    else {
+
+        try {
+
+            data =
+                JSON.parse(
+                    existing
+                );
+
+            data.scans++;
+
+        }
+
+        catch {
+
+            data = {
+
+                created:
+                    Date.now(),
+
+                scans:
+                    1
+
+            };
+
+        }
+
+    }
+
+
     await env.RATE_LIMIT.put(
+
         key,
+
         JSON.stringify(data),
+
         {
+
             expirationTtl:
                 24 * 60 * 60
+
         }
+
     );
 
+
     return Math.max(
+
         0,
-        FREE_SCAN_LIMIT - data.scans
+
+        FREE_SCAN_LIMIT -
+        data.scans
+
     );
+
 }
 
 
-// ============================================================
-// OWNER UNLOCK
-// ============================================================
+/* =========================================================
+   OWNER UNLOCK
+========================================================= */
 
-async function unlock(request, env) {
+async function unlock(
+    request,
+    env
+) {
+
+    if (!env.OWNER_CODE) {
+
+        return json({
+
+            success: false,
+
+            error:
+                "Owner code is not configured."
+
+        }, 500, env);
+
+    }
+
 
     let body;
 
+
     try {
+
         body =
             await request.json();
-    } catch {
 
-        return json(
-            {
-                success: false,
-                error: "Invalid request."
-            },
-            400
-        );
     }
+
+    catch {
+
+        return json({
+
+            success: false,
+
+            error:
+                "Invalid request."
+
+        }, 400, env);
+
+    }
+
 
     const code =
-        body?.code || "";
+        typeof body?.code === "string"
+
+            ? body.code
+
+            : "";
+
 
     if (
+
         !code ||
-        !env.OWNER_CODE ||
+
         !timingSafeEqual(
+
             code,
+
             env.OWNER_CODE
+
         )
+
     ) {
 
-        return json(
-            {
-                success: false,
-                error: "Invalid code."
-            },
-            401
-        );
+        return json({
+
+            success: false,
+
+            error:
+                "Invalid code."
+
+        }, 401, env);
+
     }
 
-    // --------------------------------------------------------
-    // Create temporary signed token
-    // --------------------------------------------------------
 
     const payload = {
 
@@ -733,21 +1173,33 @@ async function unlock(request, env) {
 
         random:
             crypto.randomUUID()
+
     };
+
 
     const encoded =
         base64urlEncode(
-            JSON.stringify(payload)
+
+            JSON.stringify(
+                payload
+            )
+
         );
+
 
     const signature =
         await sign(
+
             encoded,
+
             env.OWNER_CODE
+
         );
+
 
     const token =
         `${encoded}.${signature}`;
+
 
     return json({
 
@@ -757,13 +1209,15 @@ async function unlock(request, env) {
 
         expires:
             payload.expires
-    });
+
+    }, 200, env);
+
 }
 
 
-// ============================================================
-// VERIFY OWNER TOKEN
-// ============================================================
+/* =========================================================
+   VERIFY OWNER TOKEN
+========================================================= */
 
 async function verifyOwnerToken(
     token,
@@ -771,18 +1225,32 @@ async function verifyOwnerToken(
 ) {
 
     if (
+
         !token ||
+
+        !env.OWNER_CODE ||
+
         !token.includes(".")
+
     ) {
+
         return false;
+
     }
+
 
     const parts =
         token.split(".");
 
-    if (parts.length !== 2) {
+
+    if (
+        parts.length !== 2
+    ) {
+
         return false;
+
     }
+
 
     const encoded =
         parts[0];
@@ -790,54 +1258,89 @@ async function verifyOwnerToken(
     const signature =
         parts[1];
 
+
     const expected =
         await sign(
+
             encoded,
+
             env.OWNER_CODE
+
         );
 
+
     if (
+
         !timingSafeEqual(
+
             signature,
+
             expected
+
         )
+
     ) {
+
         return false;
+
     }
 
+
     let payload;
+
 
     try {
 
         payload =
             JSON.parse(
-                base64urlDecode(encoded)
+
+                base64urlDecode(
+                    encoded
+                )
+
             );
 
-    } catch {
+    }
+
+    catch {
 
         return false;
+
     }
+
 
     if (
         payload.owner !== true
     ) {
+
         return false;
+
     }
+
 
     if (
-        payload.expires < Date.now()
+
+        typeof payload.expires !==
+        "number" ||
+
+        payload.expires <
+        Date.now()
+
     ) {
+
         return false;
+
     }
 
+
     return true;
+
 }
 
 
-// ============================================================
-// SIGN TOKEN
-// ============================================================
+/* =========================================================
+   SIGN TOKEN
+========================================================= */
 
 async function sign(
     text,
@@ -847,176 +1350,302 @@ async function sign(
     const encoder =
         new TextEncoder();
 
+
     const key =
         await crypto.subtle.importKey(
+
             "raw",
-            encoder.encode(secret),
+
+            encoder.encode(
+                secret
+            ),
+
             {
-                name: "HMAC",
-                hash: "SHA-256"
+
+                name:
+                    "HMAC",
+
+                hash:
+                    "SHA-256"
+
             },
+
             false,
+
             ["sign"]
+
         );
+
 
     const signature =
         await crypto.subtle.sign(
+
             "HMAC",
+
             key,
-            encoder.encode(text)
+
+            encoder.encode(
+                text
+            )
+
         );
+
 
     return arrayBufferToBase64url(
         signature
     );
+
 }
 
 
-// ============================================================
-// HELPERS
-// ============================================================
+/* =========================================================
+   NUMBER HELPER
+========================================================= */
 
 function number(value) {
 
     if (
+
         value === null ||
+
         value === undefined ||
+
         value === ""
+
     ) {
+
         return null;
+
     }
 
+
+    if (
+        typeof value === "number"
+    ) {
+
+        return Number.isFinite(value)
+            ? value
+            : null;
+
+    }
+
+
+    const match =
+        String(value)
+            .replace(/,/g, "")
+            .match(
+                /-?\d+(?:\.\d+)?/
+            );
+
+
+    if (!match) {
+
+        return null;
+
+    }
+
+
     const n =
-        Number(value);
+        Number(match[0]);
+
 
     return Number.isFinite(n)
         ? n
         : null;
+
 }
 
 
-function arrayBufferToBase64(buffer) {
+/* =========================================================
+   BASE64
+========================================================= */
+
+function arrayBufferToBase64(
+    buffer
+) {
 
     let binary = "";
 
-    const bytes =
-        new Uint8Array(buffer);
 
-    const chunkSize = 0x8000;
+    const bytes =
+        new Uint8Array(
+            buffer
+        );
+
+
+    const chunkSize =
+        0x8000;
+
 
     for (
+
         let i = 0;
+
         i < bytes.length;
+
         i += chunkSize
+
     ) {
 
-        binary += String.fromCharCode(
-            ...bytes.subarray(
-                i,
-                Math.min(
-                    i + chunkSize,
-                    bytes.length
+        binary +=
+            String.fromCharCode(
+
+                ...bytes.subarray(
+
+                    i,
+
+                    Math.min(
+
+                        i + chunkSize,
+
+                        bytes.length
+
+                    )
+
                 )
-            )
-        );
+
+            );
+
     }
 
+
     return btoa(binary);
+
 }
 
 
-function arrayBufferToBase64url(buffer) {
+/* =========================================================
+   BASE64 URL
+========================================================= */
 
-    return arrayBufferToBase64(buffer)
-        .replace(/\+/g, "-")
-        .replace(/\//g, "_")
-        .replace(/=/g, "");
+function arrayBufferToBase64url(
+    buffer
+) {
+
+    return arrayBufferToBase64(
+        buffer
+    )
+
+        .replace(
+            /\+/g,
+            "-"
+        )
+
+        .replace(
+            /\//g,
+            "_"
+        )
+
+        .replace(
+            /=/g,
+            ""
+        );
+
 }
 
 
-function base64urlEncode(text) {
+function base64urlEncode(
+    text
+) {
 
     return btoa(text)
-        .replace(/\+/g, "-")
-        .replace(/\//g, "_")
-        .replace(/=/g, "");
+
+        .replace(
+            /\+/g,
+            "-"
+        )
+
+        .replace(
+            /\//g,
+            "_"
+        )
+
+        .replace(
+            /=/g,
+            ""
+        );
+
 }
 
 
-function base64urlDecode(text) {
+function base64urlDecode(
+    text
+) {
 
     let base64 =
         text
-            .replace(/-/g, "+")
-            .replace(/_/g, "/");
+
+            .replace(
+                /-/g,
+                "+"
+            )
+
+            .replace(
+                /_/g,
+                "/"
+            );
+
 
     while (
         base64.length % 4 !== 0
     ) {
+
         base64 += "=";
+
     }
 
+
     return atob(base64);
+
 }
 
 
-function timingSafeEqual(a, b) {
+/* =========================================================
+   TIMING SAFE STRING COMPARISON
+========================================================= */
 
-    if (a.length !== b.length) {
+function timingSafeEqual(
+    a,
+    b
+) {
+
+    if (
+
+        typeof a !== "string" ||
+
+        typeof b !== "string" ||
+
+        a.length !== b.length
+
+    ) {
+
         return false;
+
     }
+
 
     let result = 0;
 
+
     for (
+
         let i = 0;
+
         i < a.length;
+
         i++
+
     ) {
+
         result |=
+
             a.charCodeAt(i) ^
+
             b.charCodeAt(i);
+
     }
 
-    return resu
-lt === 0;
-}
 
-function corsHeaders() {
+    return result === 0;
 
-    return {
-
-        "Access-Control-Allow-Origin":
-            ALLOWED_ORIGIN,
-
-        "Access-Control-Allow-Methods":
-            "GET, POST, OPTIONS",
-
-        "Access-Control-Allow-Headers":
-            "Content-Type, X-Trace-Owner-Token",
-
-        "Access-Control-Max-Age":
-            "86400"
-    };
-}
-
-
-function json(
-    data,
-    status = 200
-) {
-
-    return new Response(
-        JSON.stringify(data),
-        {
-            status,
-
-            headers: {
-                "Content-Type":
-                    "application/json",
-
-                ...corsHeaders()
-            }
         }
-    );
-}
